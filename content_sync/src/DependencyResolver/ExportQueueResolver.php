@@ -3,13 +3,14 @@
 namespace Drupal\content_sync\DependencyResolver;
 
 use Drupal\Core\Serialization\Yaml;
+use Drupal\content_sync\Content\ContentDatabaseStorage;
 
 /**
  * Class ImportQueueResolver.
  *
  * @package Drupal\content_sync\DependencyResolver
  */
-class ImportQueueResolver implements ContentSyncResolverInterface {
+class ExportQueueResolver implements ContentSyncResolverInterface {
 
   /**
    * Builds a graph placing the deepest vertexes at the first place.
@@ -24,13 +25,8 @@ class ImportQueueResolver implements ContentSyncResolverInterface {
   protected function depthFirstSearch(array &$visited, array $identifiers, array $normalized_entities) {
     foreach ($identifiers as $identifier) {
 
-      // Get a decoded entity. FALSE means no need to import.
-      try {
-        $entity = $this->getEntity($identifier, $normalized_entities);
-      } catch (\Exception $e) {
-        $entity = FALSE;
-        $visited['Missing'][$identifier][] = $e->getMessage();
-      }
+      // Get a decoded entity.
+      $entity = $entity = $this->getEntity($identifier, $normalized_entities);
 
       // Process dependencies first.
       if (!empty($entity['_content_sync']['entity_dependencies'])) {
@@ -50,11 +46,11 @@ class ImportQueueResolver implements ContentSyncResolverInterface {
         }
       }
 
-      if (!isset($visited[$identifier]) && $entity) {
+      if (!isset($visited[$identifier])) {
         list($entity_type_id, $bundle, $uuid) = explode('.', $identifier);
         $visited[$identifier] = [
-          'entity_type_id' => $entity_type_id,
-          'decoded_entity' => $entity,
+          'entity_type' => $entity_type_id,
+          'entity_uuid' => $uuid,
         ];
       }
 
@@ -69,39 +65,18 @@ class ImportQueueResolver implements ContentSyncResolverInterface {
    * @param $normalized_entities
    *   An array of entity identifiers to process.
    *
-   * @return bool|mixed
-   *   Decoded entity or FALSE if an entity already exists and doesn't require to be imported.
-   *
-   * @throws \Exception
+   * @return bool|array
+   *   Array of entity data to export or FALSE if no entity found (db error).
    */
   protected function getEntity($identifier, $normalized_entities) {
     if (!empty($normalized_entities[$identifier])) {
       $entity = $normalized_entities[$identifier];
     }
     else {
-      list($entity_type_id, $bundle, $uuid) = explode('.', $identifier);
-      $file_path = content_sync_get_content_directory(CONFIG_SYNC_DIRECTORY)."/entities/".$entity_type_id."/".$bundle."/".$identifier.".yml";
-      $raw_entity = file_get_contents($file_path);
-
-      // Problems to open the .yml file.
-      if (!$raw_entity) throw new \Exception("Dependency {$identifier} is missing.");
-
-      $entity = Yaml::decode($raw_entity);
+      $activeStorage = new ContentDatabaseStorage(\Drupal::database(), 'cs_db_snapshot');
+      $entity = $activeStorage->cs_read($identifier);
     }
     return $entity;
-  }
-
-  /**
-   * Checks if a dependency exists in the site.
-   *
-   * @param $identifier
-   *   An entity identifier to process.
-   *
-   * @return bool
-   */
-  protected function entityExists($identifier) {
-    return (bool) \Drupal::database()->queryRange('SELECT 1 FROM {cs_db_snapshot} WHERE name = :name', 0, 1, [
-      ':name' => $identifier])->fetchField();
   }
 
   /**
@@ -114,10 +89,10 @@ class ImportQueueResolver implements ContentSyncResolverInterface {
    *   Queue to be processed within a batch process.
    */
   public function resolve(array $normalized_entities, $visited = []) {
-    $visited = [];
     foreach ($normalized_entities as $identifier => $entity) {
       $this->depthFirstSearch($visited, [$identifier], $normalized_entities);
     }
+
     // Reverse the array to adjust it to an array_pop-driven iterator.
     return array_reverse($visited);
   }

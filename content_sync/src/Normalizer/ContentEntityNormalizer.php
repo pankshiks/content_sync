@@ -9,6 +9,7 @@ use Drupal\Core\Entity\ContentEntityInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Entity\RevisionableInterface;
 use Drupal\Core\Url;
+use Drupal\menu_link_content\Entity\MenuLinkContent;
 use Drupal\serialization\Normalizer\ContentEntityNormalizer as BaseContentEntityNormalizer;
 
 /**
@@ -33,6 +34,7 @@ class ContentEntityNormalizer extends BaseContentEntityNormalizer {
   public function __construct(EntityTypeManagerInterface $entity_manager, SyncNormalizerDecoratorManager $decorator_manager) {
     parent::__construct($entity_manager);
     $this->decoratorManager = $decorator_manager;
+    $this->entityTypeManager = $entity_manager;
   }
 
   /**
@@ -116,7 +118,7 @@ class ContentEntityNormalizer extends BaseContentEntityNormalizer {
             $entity->uuid(),
           ];
           $dependency = implode(ContentSyncManager::DELIMITER, $ids);
-          if (!in_array($dependency, $dependencies)) {
+          if (!$this->inDependencies($dependency, $dependencies)) {
             $dependencies[$entity->getEntityTypeId()][] = $dependency;
           }
         }
@@ -131,34 +133,47 @@ class ContentEntityNormalizer extends BaseContentEntityNormalizer {
   }
 
   /**
+   * Checks if a dependency is in a dependencies nested array.
+   *
+   * @param string $dependency
+   *   An entity identifier.
+   * @param $dependencies
+   *   A nested array of dependencies.
+   *
+   * @return bool
+   */
+  protected function inDependencies($dependency, $dependencies) {
+    list($entity_type_id, $bundle, $uuid) = explode('.', $dependency);
+    if (isset($dependencies[$entity_type_id])) {
+      if (in_array($dependency, $dependencies[$entity_type_id])) return TRUE;
+    }
+    return FALSE;
+  }
+
+  /**
    * Gets a node attached to a menu link. The node has already been imported.
    *
-   * @param \Drupal\Core\Entity\EntityInterface $object
-   *   Menu Link Entity
+   * @param \Drupal\menu_link_content\Entity\MenuLinkContent $object
+   *   Menu Link Entity.
    *
-   * @return bool|\Drupal\Core\Entity\EntityInterface|null
+   * @return \Drupal\Core\Entity\EntityInterface|null
    *   Node Entity.
    *
-   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
    */
-  protected function getMenuLinkNodeAttached($object) {
-    $entity = FALSE;
-
+  protected function getMenuLinkNodeAttached(MenuLinkContent $object) {
     $uri = $object->get('link')->getString();
     $url = Url::fromUri($uri);
-    $route_parameters = NULL;
     try {
       $route_parameters = $url->getRouteParameters();
+      if (count($route_parameters) == 1) {
+        $entity_id = reset($route_parameters);
+        $entity_type = key($route_parameters);
+        return \Drupal::entityTypeManager()->getStorage($entity_type)->load($entity_id);
+      }
     }
     catch (\Exception $e) {
       // If menu link is linked to a non-node page - just do nothing.
     }
-    if (count($route_parameters) == 1) {
-      $entity_id = reset($route_parameters);
-      $entity_type = key($route_parameters);
-      $entity = \Drupal::entityTypeManager()->getStorage($entity_type)->load($entity_id);
-    }
-    return $entity;
   }
 
   /**

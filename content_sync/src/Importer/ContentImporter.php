@@ -4,9 +4,12 @@ namespace Drupal\content_sync\Importer;
 
 use Drupal\Core\Entity\ContentEntityInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\serialization\Normalizer\SerializedColumnNormalizerTrait;
 use Symfony\Component\Serializer\Serializer;
 
 class ContentImporter implements ContentImporterInterface {
+
+  use SerializedColumnNormalizerTrait;
 
   protected $format = 'yaml';
 
@@ -75,53 +78,55 @@ class ContentImporter implements ContentImporterInterface {
     }
 
     // Include Translations
-    if ($entity && $entity->isTranslatable()) {
-      $lang_default = $entity->langcode->value;
-      // Remove translations if they are in the import data then they would be re-inserted.
-      foreach ($entity->getTranslationLanguages() as $langcode => $language) {
-        // Verify that it is not the default langcode.
-        if ( $langcode != $lang_default ) {
-          $entity->removeTranslation($langcode);
-        }
-      }
-      // Save entity to make sure translations are removed.
-      $entity->save();
+    if ($entity){
       if ( isset($entity_translations) && is_array($entity_translations) ) {
-        $site_languages = \Drupal::languageManager()->getLanguages();
-        foreach ($site_languages as $langcode => $language) {
-          if(isset($entity_translations[$langcode])){
-            $translation = $entity_translations[$langcode];
-            // Add translation only if it is not the default language
-            if ( $langcode != $lang_default ) {
-              // Denormalize
-              $translation = $this->serializer->denormalize($translation, $entity_type->getClass(), $this->format, $context);
-              // Add translation
-              $entity_translation = $entity->addTranslation($langcode);
-              // Get fields definitions
-              $fields = $translation->getFieldDefinitions();
-              foreach ($translation as $itemID => $item) {
-                if ($entity_translation->hasField($itemID)){
-                  if ($fields[$itemID]->isTranslatable() == TRUE){
-                    $entity_translation->$itemID->setValue($item->getValue());
-                  }
-                }
-              }
-              // Avoid issues updating revisions.
-              if ($entity_translation->getEntityType()->hasKey('revision')) {
-                $entity_translation->updateLoadedRevisionId();
-                $entity_translation->setNewRevision(FALSE);
-              }
-              // Save the entity translation.
-              $entity_translation->save();
-            }
+        $this->updateTranslation($entity, $entity_type, $entity_translations, $context);
+      }
+    }
+    return $entity;
+  }
+
+  /**
+   * Updates translations.
+   *
+   * @param $entity
+   *   An entity object.
+   * @param \Drupal\Core\Entity\ContentEntityType $entity_type
+   *   A ContentEntityType object.
+   * @param array $entity_translations
+   *   An array of translations.
+   * @param $context
+   *   The batch context.
+   */
+  protected function updateTranslation(&$entity, $entity_type, $entity_translations, $context) {
+    foreach ($entity_translations as $langcode => $translation) {
+      // Denormalize.
+      $translation = $this->serializer->denormalize($translation, $entity_type->getClass(), $this->format, $context);
+
+      // If an entity has a translation - update one, otherwise - add a new one.
+      $entity_translation = $entity->hasTranslation($langcode) ? $entity->getTranslation($langcode) : $entity->addTranslation($langcode);
+
+      // Get fields definitions.
+      $fields = $translation->getFieldDefinitions();
+
+      foreach ($translation as $itemID => $item) {
+        if ($entity_translation->hasField($itemID)){
+          if ($fields[$itemID]->isTranslatable() == TRUE){
+            $entity_translation->$itemID->setValue($item->getValue());
           }
         }
       }
+
+      // Avoid issues updating revisions.
+      if ($entity_translation->getEntityType()->hasKey('revision')) {
+        $entity_translation->updateLoadedRevisionId();
+        $entity_translation->setNewRevision(FALSE);
+      }
+
+      // Save the entity translation.
+      $entity_translation->save();
     }
-    elseif ($entity) {
-      $entity->save();
-    }
-    return $entity;
+
   }
 
   /**
@@ -172,6 +177,36 @@ class ContentImporter implements ContentImporterInterface {
   }
 
   /**
+   * Serializes fields which have to be stored serialized.
+   *
+   * @param $entity
+   *   The entity to update.
+   *
+   * @return mixed
+   *   The entity with the fields being serialized.
+   */
+  protected function processSerializedFields($entity) {
+    foreach ($entity->getTypedData() as $name => $field_items) {
+      foreach ($field_items as $field_item) {
+        // Determine whether field has serialized properties, and if so,
+        // sanitize.
+        $serialized_property_names = $this->getCustomSerializedPropertyNames($field_item);
+        if (!empty($serialized_property_names)) {
+          $field_values = $field_item->getValue();
+          foreach ($serialized_property_names as $property_name) {
+            // TODO: Do we need to test isset($field_values[$property_name])?
+            // Presumably if $property_name is coming from getCustomSerializedPropertyNames()
+            // there ought to be a corresponding $field_values by that name.
+            $field_values[$property_name] = (is_array($field_values[$property_name])) ? serialize($field_values[$property_name]) : $field_values[$property_name];
+          }
+          $entity->set($name, $field_values);
+        }
+      }
+    }
+    return $entity;
+  }
+
+  /**
    * {@inheritdoc}
    */
   public function prepareEntity(ContentEntityInterface $entity) {
@@ -194,13 +229,13 @@ class ContentImporter implements ContentImporterInterface {
           }
         }
       }
-      return $original_entity;
+      return $this->processSerializedFields($original_entity);
     }
     $duplicate = $entity->createDuplicate();
     $entity_type = $entity->getEntityType();
     $duplicate->{$entity_type->getKey('uuid')}->value = $uuid;
 
-    return $duplicate;
+    return $this->processSerializedFields($duplicate);
   }
 
   /**
